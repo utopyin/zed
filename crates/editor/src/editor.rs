@@ -18,6 +18,7 @@ mod clangd_ext;
 pub mod code_context_menus;
 mod code_lens;
 mod debugger_hover;
+mod diff_file_tree;
 pub mod display_map;
 mod document_colors;
 mod document_links;
@@ -132,7 +133,9 @@ pub use multi_buffer::{
     MultiBufferOffset, MultiBufferOffsetUtf16, MultiBufferSnapshot, PathKey, RowInfo, ToOffset,
     ToPoint,
 };
-pub use split::{DiffStyleControls, SplittableEditor, ToggleSplitDiff};
+pub use split::{
+    DiffStyleControls, SplittableEditor, ToggleDiffFileRead, ToggleDiffFileTree, ToggleSplitDiff,
+};
 pub use split_editor_view::SplitEditorView;
 pub use text::Bias;
 

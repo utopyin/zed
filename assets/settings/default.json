@@ -424,6 +424,8 @@
   //
   // Default: 100
   "minimum_split_diff_width": 100,
+  // Whether to show a file tree beside multi-file diffs.
+  "show_diff_file_tree": true,
   // Show method signatures in the editor, when inside parentheses.
   "auto_signature_help": false,
   // Whether to automatically detect the language of an untitled buffer from its contents.

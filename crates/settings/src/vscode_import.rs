@@ -345,6 +345,7 @@ impl VsCodeSettings {
             completion_menu_item_kind: None,
             diff_view_style: None,
             minimum_split_diff_width: None,
+            show_diff_file_tree: None,
         }
     }
 

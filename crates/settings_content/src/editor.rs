@@ -287,6 +287,11 @@ pub struct EditorSettingsContent {
     ///
     /// Default: 100
     pub minimum_split_diff_width: Option<f32>,
+
+    /// Whether to show a file tree beside multi-file diffs.
+    ///
+    /// Default: true
+    pub show_diff_file_tree: Option<bool>,
 }
 
 #[derive(

@@ -1925,7 +1925,7 @@ fn editor_page() -> SettingsPage {
         ]
     }
 
-    fn multibuffer_section() -> [SettingsPageItem; 7] {
+    fn multibuffer_section() -> [SettingsPageItem; 8] {
         [
             SettingsPageItem::SectionHeader("Multibuffer"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -2021,6 +2021,20 @@ fn editor_page() -> SettingsPage {
                     },
                     write: |settings_content, value, _| {
                         settings_content.editor.minimum_split_diff_width = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Show Diff File Tree",
+                description: "Whether to show a file tree beside multi-file diffs.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("show_diff_file_tree"),
+                    pick: |settings_content| settings_content.editor.show_diff_file_tree.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.editor.show_diff_file_tree = value;
                     },
                 }),
                 metadata: None,

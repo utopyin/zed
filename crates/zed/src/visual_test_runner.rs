@@ -552,6 +552,23 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         }
     }
 
+    // Run Test 7b: Diff file tree visual tests
+    println!("\n--- Test 7b: diff_file_tree (2 variants) ---");
+    match run_diff_file_tree_visual_tests(app_state.clone(), &mut cx, update_baseline) {
+        Ok(TestResult::Passed) => {
+            println!("✓ diff_file_tree: PASSED");
+            passed += 1;
+        }
+        Ok(TestResult::BaselineUpdated(_)) => {
+            println!("✓ diff_file_tree: Baselines updated");
+            updated += 1;
+        }
+        Err(e) => {
+            eprintln!("✗ diff_file_tree: FAILED - {}", e);
+            failed += 1;
+        }
+    }
+
     // Run Test 8: ThreadItem icon decorations visual tests
     println!("\n--- Test 8: thread_item_icon_decorations ---");
     match run_thread_item_icon_decorations_visual_tests(app_state.clone(), &mut cx, update_baseline)
@@ -1461,6 +1478,192 @@ fn run_settings_ui_subpage_visual_tests(
         (TestResult::Passed, TestResult::Passed) => Ok(TestResult::Passed),
         (TestResult::BaselineUpdated(p), _) | (_, TestResult::BaselineUpdated(p)) => {
             Ok(TestResult::BaselineUpdated(p.clone()))
+        }
+    }
+}
+
+/// Visual tests for the file tree beside multi-file diffs:
+/// 1. Project diff across nested directories
+/// 2. The same diff after marking the top file as read
+#[cfg(target_os = "macos")]
+fn run_diff_file_tree_visual_tests(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    use gpui::Focusable as _;
+
+    let temp_dir = tempfile::tempdir()?;
+    let temp_path = temp_dir.keep();
+    let project_path = temp_path.canonicalize()?.join("project");
+    std::fs::create_dir_all(project_path.join("src/ui/components"))?;
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project_path)
+            .output()
+    };
+    git(&["init"])?;
+    git(&["config", "user.email", "test@test.com"])?;
+    git(&["config", "user.name", "Test User"])?;
+
+    let committed_files = [
+        ("README.md", "# Project\n\nA small project.\n"),
+        ("src/main.rs", "fn main() {\n    println!(\"hello\");\n}\n"),
+        ("src/ui/components/button.rs", "pub struct Button;\n"),
+        ("src/ui/components/legacy.rs", "pub struct Legacy;\n"),
+        ("src/ui/theme.rs", "pub const ACCENT: u32 = 0x0000ff;\n"),
+    ];
+    for (path, content) in committed_files {
+        std::fs::write(project_path.join(path), content)?;
+    }
+    git(&["add", "."])?;
+    git(&["commit", "-m", "Initial commit"])?;
+
+    std::fs::write(
+        project_path.join("README.md"),
+        "# Project\n\nA small project with a file tree.\n",
+    )?;
+    std::fs::write(
+        project_path.join("src/main.rs"),
+        "fn main() {\n    println!(\"hello, world\");\n    ui::run();\n}\n",
+    )?;
+    std::fs::write(
+        project_path.join("src/ui/components/button.rs"),
+        "pub struct Button {\n    pub label: String,\n}\n",
+    )?;
+    std::fs::write(
+        project_path.join("src/ui/components/badge.rs"),
+        "pub struct Badge;\n",
+    )?;
+    std::fs::remove_file(project_path.join("src/ui/components/legacy.rs"))?;
+    std::fs::write(
+        project_path.join("src/ui/theme.rs"),
+        "pub const ACCENT: u32 = 0x00ff00;\n",
+    )?;
+
+    let project = cx.update(|cx| {
+        project::Project::local(
+            app_state.client.clone(),
+            app_state.node_runtime.clone(),
+            app_state.user_store.clone(),
+            app_state.languages.clone(),
+            app_state.fs.clone(),
+            None,
+            project::LocalProjectFlags {
+                init_worktree_trust: false,
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+    let add_worktree_task = project.update(cx, |project, cx| {
+        project.find_or_create_worktree(&project_path, true, cx)
+    });
+    cx.background_executor.allow_parking();
+    cx.foreground_executor
+        .block_test(add_worktree_task)
+        .log_err();
+    cx.background_executor.forbid_parking();
+    for _ in 0..5 {
+        cx.advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+    }
+
+    let bounds = Bounds {
+        origin: point(px(0.0), px(0.0)),
+        size: size(px(1000.0), px(600.0)),
+    };
+    let workspace_window: WindowHandle<Workspace> = cx
+        .update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    cx.new(|cx| {
+                        Workspace::new(None, project.clone(), app_state.clone(), window, cx)
+                    })
+                },
+            )
+        })
+        .context("Failed to open diff file tree test window")?;
+    cx.run_until_parked();
+
+    workspace_window
+        .update(cx, |workspace, window, cx| {
+            ProjectDiff::deploy_at(workspace, None, window, cx);
+        })
+        .log_err();
+
+    let diff_file_count = |cx: &mut VisualTestAppContext| {
+        workspace_window
+            .read_with(cx, |workspace, cx| {
+                workspace
+                    .active_item(cx)
+                    .and_then(|item| item.act_as::<editor::SplittableEditor>(cx))
+                    .map_or(0, |diff| {
+                        let multibuffer = diff.read(cx).rhs_editor().read(cx).buffer().read(cx);
+                        multibuffer.snapshot(cx).buffers_with_paths().count()
+                    })
+            })
+            .unwrap_or(0)
+    };
+    // Git status is computed on real background threads, so give it wall-clock time.
+    for _ in 0..100 {
+        if diff_file_count(cx) == 6 {
+            break;
+        }
+        cx.background_executor.allow_parking();
+        std::thread::sleep(Duration::from_millis(50));
+        cx.background_executor.forbid_parking();
+        cx.advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+    }
+    anyhow::ensure!(
+        diff_file_count(cx) == 6,
+        "expected 6 files in the diff, found {}",
+        diff_file_count(cx)
+    );
+
+    let tree_result = run_visual_test(
+        "diff_file_tree",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    workspace_window
+        .update(cx, |workspace, window, cx| {
+            let diff = workspace
+                .active_item(cx)
+                .and_then(|item| item.act_as::<editor::SplittableEditor>(cx));
+            if let Some(diff) = diff {
+                window.focus(&diff.focus_handle(cx), cx);
+            }
+            window.dispatch_action(Box::new(editor::ToggleDiffFileRead), cx);
+        })
+        .log_err();
+    for _ in 0..3 {
+        cx.advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+    }
+
+    let read_result = run_visual_test(
+        "diff_file_tree_read",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    match (&tree_result, &read_result) {
+        (TestResult::Passed, TestResult::Passed) => Ok(TestResult::Passed),
+        (TestResult::BaselineUpdated(path), _) | (_, TestResult::BaselineUpdated(path)) => {
+            Ok(TestResult::BaselineUpdated(path.clone()))
         }
     }
 }

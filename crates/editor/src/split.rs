@@ -23,6 +23,7 @@ use settings::{DiffViewStyle, SeedQuerySetting, Settings, SettingsStore, update_
 use text::{Bias, BufferId, OffsetRangeExt as _, Patch, ToPoint as _};
 
 use crate::{
+    diff_file_tree::{DiffFileTree, DiffFileTreeEvent},
     display_map::CompanionExcerptPatch,
     element::SplitSide,
     split_editor_view::{SplitEditorState, SplitEditorView},
@@ -413,6 +414,16 @@ fn patch_for_excerpt(
 #[action(namespace = editor)]
 pub struct ToggleSplitDiff;
 
+/// Shows or hides the file tree beside multi-file diffs.
+#[derive(Clone, Copy, PartialEq, Eq, Action, Default)]
+#[action(namespace = editor)]
+pub struct ToggleDiffFileTree;
+
+/// Marks the file at the top of a multi-file diff as read, or unread if it already is.
+#[derive(Clone, Copy, PartialEq, Eq, Action, Default)]
+#[action(namespace = editor)]
+pub struct ToggleDiffFileRead;
+
 /// Unified/split diff view toggle buttons, shared by the toolbars of every
 /// diff view (project diff, branch diff, solo diff) so they can't drift apart.
 #[derive(gpui::IntoElement)]
@@ -456,9 +467,22 @@ impl RenderOnce for DiffStyleControls {
         } else {
             IconName::DiffSplit
         };
+        let file_tree_toggle = editor.file_tree.read(cx).has_multiple_files().then(|| {
+            IconButton::new("diff-file-tree", IconName::FileTree)
+                .icon_size(IconSize::Small)
+                .toggle_state(EditorSettings::get_global(cx).show_diff_file_tree)
+                .tooltip(Tooltip::for_action_title(
+                    "Toggle File Tree",
+                    &ToggleDiffFileTree,
+                ))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(ToggleDiffFileTree.boxed_clone(), cx);
+                })
+        });
 
         h_flex()
             .gap_1()
+            .children(file_tree_toggle)
             .child(
                 IconButton::new("diff-style-unified", IconName::DiffUnified)
                     .icon_size(IconSize::Small)
@@ -537,6 +561,7 @@ pub struct SplittableEditor {
     lhs: Option<LhsEditor>,
     workspace: WeakEntity<Workspace>,
     split_state: Entity<SplitEditorState>,
+    file_tree: Entity<DiffFileTree>,
     searched_side: Option<SplitSide>,
     /// The preferred diff style.
     diff_view_style: DiffViewStyle,
@@ -631,8 +656,14 @@ impl SplittableEditor {
             editor.set_diff_hunk_renderer(Some(Arc::new(DefaultDiffHunkRenderer)), cx);
             editor
         });
+        let file_tree =
+            cx.new(|cx| DiffFileTree::new(rhs_multibuffer.clone(), rhs_editor.clone(), cx));
+        let mut show_diff_file_tree = EditorSettings::get_global(cx).show_diff_file_tree;
         // TODO(split-diff) we might want to tag editor events with whether they came from rhs/lhs
         let subscriptions = vec![
+            cx.subscribe(&file_tree, |_, _, event, cx| match event {
+                DiffFileTreeEvent::FileCountChanged => cx.notify(),
+            }),
             cx.subscribe(
                 &rhs_editor,
                 |this, _, event: &EditorEvent, cx| match event {
@@ -657,7 +688,12 @@ impl SplittableEditor {
                 }
             }),
             cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
-                let diff_view_style = EditorSettings::get_global(cx).diff_view_style;
+                let settings = EditorSettings::get_global(cx);
+                let diff_view_style = settings.diff_view_style;
+                if show_diff_file_tree != settings.show_diff_file_tree {
+                    show_diff_file_tree = settings.show_diff_file_tree;
+                    cx.notify();
+                }
                 if this.diff_view_style() != diff_view_style {
                     this.toggle_split(&ToggleSplitDiff, window, cx);
                     cx.notify();
@@ -695,6 +731,7 @@ impl SplittableEditor {
             lhs: None,
             workspace: workspace.downgrade(),
             split_state,
+            file_tree,
             searched_side: None,
             too_narrow_for_split: false,
             last_width: None,
@@ -925,6 +962,28 @@ impl SplittableEditor {
         });
 
         cx.notify();
+    }
+
+    fn toggle_diff_file_tree(
+        &mut self,
+        _: &ToggleDiffFileTree,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let show_diff_file_tree = !EditorSettings::get_global(cx).show_diff_file_tree;
+        update_settings_file(<dyn Fs>::global(cx), cx, move |settings, _| {
+            settings.editor.show_diff_file_tree = Some(show_diff_file_tree);
+        });
+    }
+
+    fn toggle_diff_file_read(
+        &mut self,
+        _: &ToggleDiffFileRead,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_tree
+            .update(cx, |file_tree, cx| file_tree.toggle_active_file_read(cx));
     }
 
     fn diff_paths(&self, cx: &App) -> Vec<(PathKey, Entity<BufferDiff>)> {
@@ -2293,10 +2352,14 @@ impl Render for SplittableEditor {
 
         let this = cx.entity().downgrade();
         let last_width = self.last_width;
+        let show_file_tree = EditorSettings::get_global(cx).show_diff_file_tree
+            && self.file_tree.read(cx).has_multiple_files();
 
-        div()
+        h_flex()
             .id("splittable-editor")
             .on_action(cx.listener(Self::toggle_split))
+            .on_action(cx.listener(Self::toggle_diff_file_tree))
+            .on_action(cx.listener(Self::toggle_diff_file_read))
             .on_action(cx.listener(Self::activate_pane_left))
             .on_action(cx.listener(Self::activate_pane_right))
             .on_action(cx.listener(Self::intercept_toggle_breakpoint))
@@ -2306,25 +2369,33 @@ impl Render for SplittableEditor {
             .on_action(cx.listener(Self::intercept_inline_assist))
             .capture_action(cx.listener(Self::toggle_soft_wrap))
             .size_full()
-            .child(inner)
+            .when(show_file_tree, |this| this.child(self.file_tree.clone()))
             .child(
-                canvas(
-                    move |bounds, window, cx| {
-                        let width = bounds.size.width;
-                        if last_width == Some(width) {
-                            return;
-                        }
-                        window.defer(cx, move |window, cx| {
-                            this.update(cx, |this, cx| {
-                                this.width_changed(width, window, cx);
-                            })
-                            .ok();
-                        });
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(inner)
+                    .child(
+                        canvas(
+                            move |bounds, window, cx| {
+                                let width = bounds.size.width;
+                                if last_width == Some(width) {
+                                    return;
+                                }
+                                window.defer(cx, move |window, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.width_changed(width, window, cx);
+                                    })
+                                    .ok();
+                                });
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    ),
             )
     }
 }
@@ -2702,6 +2773,105 @@ mod tests {
                 editor.check_invariants(quiesced, cx);
             });
         }
+    }
+
+    #[gpui::test]
+    async fn test_diff_file_tree(cx: &mut gpui::TestAppContext) {
+        use rope::Point;
+
+        let (editor, cx) = init_test(cx, SoftWrap::None, DiffViewStyle::Unified).await;
+
+        let files = [
+            (
+                "src/main.rs",
+                "fn main() {}\n",
+                "fn main() {\n    run();\n}\n",
+            ),
+            (
+                "src/nested/deep/lib.rs",
+                "pub fn a() {}\n",
+                "pub fn b() {}\n",
+            ),
+            ("README.md", "# Old\n", "# New\n"),
+        ];
+        let mut buffers = HashMap::default();
+        for (path, base_text, current_text) in files {
+            let (buffer, diff) = buffer_with_diff(base_text, current_text, cx);
+            editor.update(cx, |editor, cx| {
+                let end = buffer.read(cx).max_point();
+                editor.update_excerpts_for_path(
+                    PathKey::with_sort_prefix(0, rel_path(path).into_arc()),
+                    buffer.clone(),
+                    vec![Point::zero()..end],
+                    0,
+                    diff.clone(),
+                    cx,
+                );
+            });
+            buffers.insert(path, (buffer, diff));
+        }
+        cx.run_until_parked();
+
+        let rows = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |editor, cx| editor.file_tree.read(cx).rows_for_test())
+        };
+        assert_eq!(
+            rows(cx),
+            [
+                "src/",
+                "  nested/deep/",
+                "    lib.rs",
+                "  main.rs",
+                "README.md"
+            ]
+        );
+
+        let (main_buffer, main_diff) = buffers["src/main.rs"].clone();
+        let main_buffer_id = main_buffer.read_with(cx, |buffer, _| buffer.remote_id());
+        let is_main_folded = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |editor, cx| {
+                editor
+                    .rhs_editor
+                    .read(cx)
+                    .is_buffer_folded(main_buffer_id, cx)
+            })
+        };
+
+        editor.update(cx, |editor, cx| {
+            editor.file_tree.update(cx, |file_tree, cx| {
+                file_tree.set_read_for_test("src/main.rs", true, cx)
+            })
+        });
+        assert_eq!(
+            rows(cx),
+            [
+                "src/",
+                "  nested/deep/",
+                "    lib.rs",
+                "  main.rs (read)",
+                "README.md"
+            ]
+        );
+        assert!(is_main_folded(cx));
+
+        main_buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0..0, "// edited\n")], None, cx)
+        });
+        main_diff.update(cx, |diff, cx| {
+            diff.recalculate_diff_sync(&main_buffer.read(cx).text_snapshot(), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            rows(cx),
+            [
+                "src/",
+                "  nested/deep/",
+                "    lib.rs",
+                "  main.rs",
+                "README.md"
+            ]
+        );
+        assert!(!is_main_folded(cx));
     }
 
     #[gpui::test]

@@ -72,6 +72,7 @@ pub struct EditorSettings {
     pub diff_view_style: DiffViewStyle,
     pub minimum_split_diff_width: f32,
     pub commit_view: CommitViewSettings,
+    pub show_diff_file_tree: bool,
     pub file_diff: FileDiffSettings,
 }
 
@@ -358,6 +359,7 @@ impl Settings for EditorSettings {
                 expand_description: commit_view.expand_description.unwrap(),
                 expand_files: commit_view.expand_files.unwrap(),
             },
+            show_diff_file_tree: editor.show_diff_file_tree.unwrap(),
             file_diff: FileDiffSettings {
                 show_full_file: file_diff.show_full_file.unwrap(),
             },
